@@ -1,0 +1,27 @@
+# Konfigurasi Supabase CLI (opsional; untuk `supabase start` / `supabase db push` / `supabase functions deploy`)
+project_id = "nexora"
+
+[api]
+port = 54321
+schemas = ["public", "graphql_public"]
+
+[db]
+port = 54322
+major_version = 15
+
+[auth]
+site_url = "http://localhost:5173"
+additional_redirect_urls = ["http://localhost:5173", "http://localhost:4173"]
+# Registrasi publik dimatikan: akun hanya dibuat oleh Edge Function redeem-invite
+enable_signup = false
+minimum_password_length = 8
+
+[auth.email]
+enable_signup = false
+enable_confirmations = false
+
+[functions.redeem-invite]
+verify_jwt = false      # dipanggil sebelum user punya akun
+
+[functions.send-reminders]
+verify_jwt = false      # diamankan dengan header x-cron-secret
