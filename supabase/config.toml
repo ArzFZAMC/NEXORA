@@ -25,3 +25,6 @@ verify_jwt = false      # dipanggil sebelum user punya akun
 
 [functions.send-reminders]
 verify_jwt = false      # diamankan dengan header x-cron-secret
+
+[functions.send-test-push]
+verify_jwt = false     # token pengguna diverifikasi manual lewat auth.getUser() di dalam fungsi

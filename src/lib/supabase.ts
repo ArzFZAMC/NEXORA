@@ -1,7 +1,12 @@
 import { createClient } from '@supabase/supabase-js';
 
-const url = import.meta.env.VITE_SUPABASE_URL as string | undefined;
-const anon = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
+// Merapikan URL dari .env: buang spasi, garis miring di akhir, dan path ekstra (mis. "/rest/v1")
+function normalizeUrl(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  try { return new URL(raw.trim()).origin; } catch { return raw.trim(); }
+}
+const url = normalizeUrl(import.meta.env.VITE_SUPABASE_URL as string | undefined);
+const anon = (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
 
 export const isConfigured = Boolean(url && anon && !url.includes('xxxxxxxx'));
 

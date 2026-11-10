@@ -36,7 +36,7 @@ export function AlarmHost() {
       stop(); stopSound.current = startAlarmSound(url);
     }
     if ('Notification' in window && Notification.permission === 'granted' && document.visibilityState !== 'visible') {
-      try { new Notification('NEXORA', { body: `${d.instance.title} • ${shortTime(d.instance.start_time)}`, tag: `alarm-${d.instance.id}`, icon: '/icons/icon-192.png' }); } catch { /* beberapa browser mobile melarang konstruktor */ }
+      try { new Notification('NEXORA', { body: `${d.instance.title} • ${shortTime(d.instance.start_time)}`, tag: `instance-${d.instance.id}`, icon: '/icons/icon-192.png' }); } catch { /* beberapa browser mobile melarang konstruktor */ }
     }
   }, [data?.settings, stop]);
 

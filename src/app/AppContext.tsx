@@ -6,6 +6,7 @@ import { ApiError } from '../lib/api';
 import { addDays, todayInTz, type ISODate } from '../lib/date';
 import { idbGet, idbSet, idbOutboxStorage } from '../lib/idb';
 import { Outbox } from '../lib/outbox';
+import { syncPushSubscription } from '../lib/push';
 import { I18nProvider, translate, type Lang } from '../i18n';
 import { ConfirmProvider, useToast } from '../components/ui/ui';
 import type { Achievement, Instance, LifeArea } from '../lib/types';
@@ -187,6 +188,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }, 60_000);
     return () => { window.clearTimeout(timer); supabase.removeChannel(ch); document.removeEventListener('visibilitychange', onVisible); window.clearInterval(tick); };
   }, [user?.id, status]);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---------------------------------------------------------------- push: sinkronisasi senyap
+  // Tidak pernah memunculkan dialog izin. Hanya memperbarui langganan di database bila pengguna SUDAH mengaktifkan push
+  // dan izin browser masih 'granted' (mis. endpoint/kunci berubah, atau pushsubscriptionchange dari service worker).
+  useEffect(() => {
+    if (!user || status !== 'ready' || !data?.settings.notify_push) return;
+    void syncPushSubscription().catch(() => undefined);
+  }, [user?.id, status, data?.settings.notify_push]);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return;
+    const onMsg = (e: MessageEvent) => { if (e.data?.type === 'nexora-push-resubscribe') void syncPushSubscription().catch(() => undefined); };
+    navigator.serviceWorker.addEventListener('message', onMsg);
+    return () => navigator.serviceWorker.removeEventListener('message', onMsg);
+  }, []);
 
   // ---------------------------------------------------------------- aksi
   const patchInstance = useCallback((id: string, patch: Partial<Instance>) => {

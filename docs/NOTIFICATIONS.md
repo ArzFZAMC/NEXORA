@@ -9,22 +9,22 @@
 ## Kenapa alarm lokal tidak bisa andal saat browser ditutup
 Saat browser/tab ditutup, JavaScript tidak berjalan, dan service worker tidak boleh menjadwalkan timer lama sendiri. Satu-satunya cara yang didukung browser adalah **server mengirim push** yang membangunkan service worker. Karena itu NEXORA tidak mengklaim alarm lokal andal saat tertutup.
 
-## Alur Web Push
-1. Pengguna menekan **Pengaturan → Aktifkan notifikasi push** → izin browser → langganan disimpan di `push_subscriptions`.
-2. `pg_cron` memanggil Edge Function `send-reminders` tiap menit (dengan header `x-cron-secret`).
-3. Fungsi memanggil `due_reminders()` (aktivitas berstatus planned, alarm aktif, waktu pengingat dalam 2 menit terakhir, belum pernah dikirim), mengirim push, lalu `mark_reminders_sent()` agar tidak terkirim dua kali. Langganan yang sudah mati (404/410) dibersihkan otomatis.
-4. `sw.js` menampilkan notifikasi; mengetuknya membuka NEXORA.
+## Alur Web Push (v2 — Background Push)
+1. Pengguna menekan **Pengaturan → Aktifkan notifikasi push** (izin TIDAK pernah diminta otomatis) → izin browser → langganan dibuat dan disimpan lewat RPC `register_push_subscription` (user_id diambil dari `auth.uid()` di database, bukan dari frontend). Banyak perangkat didukung; tiap perangkat satu baris di `push_subscriptions`.
+2. `pg_cron` memanggil Edge Function `send-reminders` tiap menit dengan header `x-cron-secret` (secret ada di Supabase Vault).
+3. Fungsi memanggil `claim_due_reminders()`: database menghitung `fire_at` = (tanggal + jam mulai − offset alarm) pada **zona waktu profil pengguna**, membuat baris `push_deliveries` secara idempoten (indeks unik `instance_id + subscription_id + fire_at`) dan mengklaimnya dengan `FOR UPDATE SKIP LOCKED` → tidak ada pengiriman ganda walau fungsi berjalan dobel. Toleransi keterlambatan scheduler 10 menit; lebih lama dari itu dianggap basi dan dilewati.
+4. Fungsi mengirim Web Push (VAPID) ke tiap perangkat lalu memanggil `complete_push_delivery()`. 404/410 → langganan dinonaktifkan; gagal sementara → dicoba ulang (maks. 3 kali selama masih dalam toleransi).
+5. `sw.js` menampilkan notifikasi (tag `instance-<id>`, sama dengan notifikasi alarm in-app sehingga saling menggantikan). Mengetuknya membuka `/calendar?date=YYYY-MM-DD`. URL dari payload divalidasi: hanya path internal.
+6. Bila NEXORA sedang terlihat, service worker tidak menampilkan notifikasi pengingat (alarm in-app sudah menanganinya), kecuali di iOS/Safari yang mewajibkan setiap push menampilkan notifikasi.
+7. Alarm in-app lama tidak diubah dan tetap berjalan seperti sebelumnya; push hanyalah lapisan tambahan.
 
 ## Setup
-```bash
-npx web-push generate-vapid-keys
-npx supabase secrets set VAPID_PUBLIC_KEY=... VAPID_PRIVATE_KEY=... VAPID_SUBJECT=mailto:emailkamu@contoh.com CRON_SECRET=<acak-panjang>
-npx supabase functions deploy send-reminders --no-verify-jwt
-```
-Isi `VITE_VAPID_PUBLIC_KEY` (publik saja) di `.env.local` dan Vercel, lalu build ulang. Jalankan `supabase/optional/cron.sql` setelah mengganti `<PROJECT_REF>` dan `<CRON_SECRET>` (jangan commit file yang sudah berisi secret).
+Lihat `INSTALLATION.md` pada paket update (migrasi 0006, VAPID, secrets, deploy 2 fungsi, `supabase/optional/cron.sql`, env Vercel).
+Secrets Edge Function: `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT`, `CRON_SECRET` (min. 16 karakter), `ALLOWED_ORIGINS`. Frontend hanya memakai `VITE_VAPID_PUBLIC_KEY`.
 
 ## Batasan
-- Presisi sekitar 1 menit (cron per menit); OS dapat menunda push (mode hemat daya, Doze).
+- Presisi sekitar 1 menit (cron per menit) dan TIDAK dijamin tepat detik; OS/layanan push dapat menunda (mode hemat daya, Doze). Pengingat yang terlambat lebih dari 10 menit dilewati.
+- Jika pengguna menutup paksa browser (force stop) atau menghapus data situs, sebagian perangkat Android tidak menerima push sampai aplikasi dibuka lagi.
 - **iPhone/iPad**: push hanya jika NEXORA dipasang ke Layar Utama (iOS 16.4+) dan dibuka dari ikon itu.
 - Audio unggahan **tidak** diputar oleh push; hanya alarm in-app.
 - Pengingat yang jatuh pada hari sebelumnya (mis. mulai 00:10, 30 menit sebelumnya) ditangani push, bukan alarm in-app.

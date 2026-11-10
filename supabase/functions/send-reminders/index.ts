@@ -1,58 +1,48 @@
-// Edge Function: send-reminders
-// Dipanggil tiap menit oleh pg_cron (lihat supabase/optional/cron.sql). Mengirim Web Push untuk aktivitas
-// yang alarmnya jatuh tempo, sehingga notifikasi muncul walau browser/tab sudah ditutup.
-import { createClient } from "npm:@supabase/supabase-js@2";
-import webpush from "npm:web-push@3.6.7";
+// Edge Function: send-reminders (diperbarui — Background Push v2)
+// Dipanggil tiap menit oleh pg_cron (supabase/optional/cron.sql) dengan header x-cron-secret.
+// Alur: claim_due_reminders() (atomik, idempoten) -> kirim Web Push per perangkat -> complete_push_delivery().
+// Fungsi ini tidak menerima user ID atau jadwal dari request: semua ditentukan database.
+import { createClient } from 'npm:@supabase/supabase-js@2';
+import { configureWebPush, sendPush } from '../_shared/webpush.ts';
+import { reminderPayload, safeEqual, type DueRow } from '../_shared/payload.ts';
 
-type Due = {
-  instance_id: string; user_id: string; title: string; start_time: string;
-  endpoint: string; p256dh: string; auth: string;
-};
+interface Claimed extends DueRow {
+  delivery_id: number; d_user_id: string; d_endpoint: string; d_p256dh: string; d_auth: string;
+}
+
+const json = (status: number, body: unknown) =>
+  new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
 Deno.serve(async (req) => {
-  const secret = Deno.env.get("CRON_SECRET");
-  if (!secret || req.headers.get("x-cron-secret") !== secret) {
-    return new Response("unauthorized", { status: 401 });
-  }
+  if (req.method !== 'POST') return json(405, { error: 'method not allowed' });
 
-  const pub = Deno.env.get("VAPID_PUBLIC_KEY");
-  const priv = Deno.env.get("VAPID_PRIVATE_KEY");
-  const subject = Deno.env.get("VAPID_SUBJECT") ?? "mailto:admin@example.com";
-  if (!pub || !priv) return new Response("VAPID keys belum diset", { status: 500 });
-  webpush.setVapidDetails(subject, pub, priv);
+  const secret = Deno.env.get('CRON_SECRET');
+  const given = req.headers.get('x-cron-secret') ?? '';
+  if (!secret || secret.length < 16) return json(500, { error: 'CRON_SECRET belum diset (min. 16 karakter)' });
+  if (!safeEqual(given, secret)) return json(401, { error: 'unauthorized' });
 
-  const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, {
+  try { configureWebPush(); } catch (e) { return json(500, { error: (e as Error).message }); }
+
+  const admin = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
-  const { data, error } = await admin.rpc("due_reminders", { p_now: new Date().toISOString(), p_window_minutes: 2 });
-  if (error) return new Response(error.message, { status: 500 });
+  const { data, error } = await admin.rpc('claim_due_reminders', { p_now: new Date().toISOString(), p_grace_minutes: 10, p_limit: 200, p_max_attempts: 3 });
+  if (error) { console.error('claim gagal', error.code); return json(500, { error: 'claim gagal' }); }
 
-  const rows = (data ?? []) as Due[];
-  const sentInstances = new Set<string>();
-  const deadEndpoints: string[] = [];
+  const rows = (data ?? []) as Claimed[];
+  const summary = { claimed: rows.length, sent: 0, failed: 0, expired: 0 };
 
-  await Promise.all(rows.map(async (r) => {
-    const payload = JSON.stringify({
-      title: "NEXORA",
-      body: `${r.title} • ${r.start_time.slice(0, 5)}`,
-      tag: `instance-${r.instance_id}`,
-      url: "/",
-    });
-    try {
-      await webpush.sendNotification({ endpoint: r.endpoint, keys: { p256dh: r.p256dh, auth: r.auth } }, payload);
-      sentInstances.add(r.instance_id);
-    } catch (e) {
-      const status = (e as { statusCode?: number }).statusCode;
-      if (status === 404 || status === 410) deadEndpoints.push(r.endpoint);   // langganan sudah tidak berlaku
-      else console.error("push gagal", status);
-    }
-  }));
-
-  if (sentInstances.size) await admin.rpc("mark_reminders_sent", { p_ids: [...sentInstances] });
-  if (deadEndpoints.length) await admin.from("push_subscriptions").delete().in("endpoint", deadEndpoints);
-
-  return new Response(JSON.stringify({ due: rows.length, sent: sentInstances.size, removed: deadEndpoints.length }), {
-    headers: { "Content-Type": "application/json" },
-  });
+  // Kirim paralel terbatas (20 sekaligus) agar tidak melewati batas waktu fungsi
+  for (let i = 0; i < rows.length; i += 20) {
+    await Promise.all(rows.slice(i, i + 20).map(async (r) => {
+      const res = await sendPush({ endpoint: r.d_endpoint, p256dh: r.d_p256dh, auth: r.d_auth }, reminderPayload(r));
+      summary[res.outcome]++;
+      const { error: e2 } = await admin.rpc('complete_push_delivery', {
+        p_id: r.delivery_id, p_outcome: res.outcome, p_http: res.status, p_error: res.error,
+      });
+      if (e2) console.error('complete gagal', r.delivery_id, e2.code);   // 'sending' macet akan diklaim ulang setelah 3 menit
+    }));
+  }
+  return json(200, summary);
 });

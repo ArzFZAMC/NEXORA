@@ -20,7 +20,7 @@ function toApiError(e: unknown): ApiError {
     || /failed to fetch|networkerror|network request failed|load failed/i.test(msg) || err?.name === 'TypeError';
   if (network) return new ApiError('Tidak ada koneksi ke server.', true);
   if (err?.code === '23505') return new ApiError('Data yang sama sudah ada (duplikat).', false, err.code);
-  if (err?.code === '42501') return new ApiError('Kamu tidak memiliki izin untuk aksi ini.', false, err.code);
+  if (err?.code === '42501') return new ApiError('Akses ditolak database (42501). Jalankan migrasi supabase/migrations/0005_grants.sql di SQL Editor (lihat README).', false, err.code);
   if (err?.code === '28000' || /jwt|not authenticated/i.test(msg)) return new ApiError('Sesi berakhir. Silakan masuk lagi.', false, '28000');
   return new ApiError(msg, false, err?.code);
 }
@@ -191,15 +191,34 @@ export async function downloadSound(path: string): Promise<Blob> {
 }
 
 // ------------------------------------------------------------------ push
-export async function savePushSubscription(uid: string, sub: PushSubscription) {
-  const json = sub.toJSON();
-  if (!json.endpoint || !json.keys?.p256dh || !json.keys?.auth) throw new ApiError('Langganan push tidak lengkap.');
-  await run(supabase.from('push_subscriptions').upsert(
-    { user_id: uid, endpoint: json.endpoint, p256dh: json.keys.p256dh, auth: json.keys.auth, user_agent: navigator.userAgent.slice(0, 200) },
-    { onConflict: 'endpoint' }));
+export interface PushDevice { id: string; endpoint: string; device_label: string; is_active: boolean; created_at: string; last_success_at: string | null; last_error: string | null }
+// Penulisan langganan hanya lewat RPC SECURITY DEFINER (user_id diambil dari auth.uid() di database, bukan dari frontend).
+export const registerPushSubscription = (i: { endpoint: string; p256dh: string; auth: string; userAgent: string; label: string }) =>
+  run<string>(supabase.rpc('register_push_subscription', { p_endpoint: i.endpoint, p_p256dh: i.p256dh, p_auth: i.auth, p_user_agent: i.userAgent, p_label: i.label }));
+export const listPushDevices = () =>
+  run<PushDevice[]>(supabase.from('push_subscriptions').select('id,endpoint,device_label,is_active,created_at,last_success_at,last_error').order('created_at', { ascending: false }));
+export const removePushDevice = (id: string) => run(supabase.from('push_subscriptions').delete().eq('id', id)).then(() => undefined);
+export const removePushSubscriptionByEndpoint = (endpoint: string) => run(supabase.from('push_subscriptions').delete().eq('endpoint', endpoint)).then(() => undefined);
+export async function sendTestPush(): Promise<{ sent: number; failed: number }> {
+  const { data: s } = await supabase.auth.getSession();
+  const token = s.session?.access_token;
+  if (!token) throw new ApiError('Sesi berakhir. Masuk lagi.');
+  let res: Response;
+  try {
+    res = await fetch(`${supabaseUrl}/functions/v1/send-test-push`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', apikey: import.meta.env.VITE_SUPABASE_ANON_KEY as string, Authorization: `Bearer ${token}` },
+      body: '{}',   // tidak ada user ID di body: server mengambil identitas dari token
+    });
+  } catch { throw new ApiError('Tidak dapat menghubungi server notifikasi.', true); }
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    if (body?.error) throw new ApiError(body.error);
+    if (res.status === 404) throw new ApiError('Fungsi send-test-push belum ter-deploy (HTTP 404). Lihat INSTALLATION.md.');
+    throw new ApiError(`Gagal mengirim notifikasi percobaan (HTTP ${res.status}).`);
+  }
+  return body as { sent: number; failed: number };
 }
-export const deletePushSubscription = (endpoint: string) =>
-  run(supabase.from('push_subscriptions').delete().eq('endpoint', endpoint)).then(() => undefined);
 
 // ------------------------------------------------------------------ versi jadwal
 export const saveScheduleVersion = (name: string, note: string) => run<string>(supabase.rpc('save_schedule_version', { p_name: name, p_note: note }));

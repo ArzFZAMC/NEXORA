@@ -1,43 +1,71 @@
+// Web Push di sisi klien. PENTING: izin notifikasi HANYA diminta di dalam enablePush(), yang dipanggil dari klik tombol pengguna.
+// Tidak ada pemanggilan requestPermission() otomatis saat aplikasi dibuka.
 import { vapidPublicKey } from './supabase';
-import { deletePushSubscription, savePushSubscription } from './api';
+import { registerPushSubscription, removePushSubscriptionByEndpoint } from './api';
+import { computeSupport, deviceLabel, sameKey, urlBase64ToUint8Array, type PushSupport } from './pushUtil';
 
-export type PushSupport = 'ok' | 'unsupported' | 'no-key' | 'denied' | 'ios-needs-install';
+export type { PushSupport };
 
 export function pushSupport(): PushSupport {
-  if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
-    const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
-    return ios ? 'ios-needs-install' : 'unsupported';
-  }
-  if (!vapidPublicKey) return 'no-key';
-  if (Notification.permission === 'denied') return 'denied';
-  return 'ok';
-}
-
-function urlBase64ToUint8Array(base64: string): Uint8Array {
-  const padding = '='.repeat((4 - (base64.length % 4)) % 4);
-  const raw = atob((base64 + padding).replace(/-/g, '+').replace(/_/g, '/'));
-  return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
-}
-
-export async function enablePush(uid: string): Promise<void> {
-  const perm = await Notification.requestPermission();
-  if (perm !== 'granted') throw new Error('Izin notifikasi ditolak.');
-  const reg = await navigator.serviceWorker.ready;
-  const existing = await reg.pushManager.getSubscription();
-  const sub = existing ?? await reg.pushManager.subscribe({
-    userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(vapidPublicKey) as BufferSource,
+  return computeSupport({
+    hasSW: 'serviceWorker' in navigator,
+    hasPush: 'PushManager' in window,
+    hasNotification: 'Notification' in window,
+    permission: 'Notification' in window ? Notification.permission : 'default',
+    ua: navigator.userAgent,
+    secure: window.isSecureContext,
+    hasKey: Boolean(vapidPublicKey),
   });
-  await savePushSubscription(uid, sub);
+}
+
+export const notificationPermission = (): NotificationPermission | 'unsupported' => ('Notification' in window ? Notification.permission : 'unsupported');
+
+/** Pakai service worker yang sudah ada (didaftarkan main.tsx). Jika belum (mis. mode dev), daftarkan SW yang SAMA, bukan yang baru. */
+async function getRegistration(): Promise<ServiceWorkerRegistration> {
+  const existing = await navigator.serviceWorker.getRegistration('/');
+  const reg = existing ?? await navigator.serviceWorker.register('/sw.js');
+  const ready = navigator.serviceWorker.ready;
+  const timeout = new Promise<never>((_, rej) => setTimeout(() => rej(new Error('Service worker belum siap. Muat ulang halaman lalu coba lagi.')), 10_000));
+  await Promise.race([ready, timeout]);
+  return reg;
+}
+
+async function subscribeAndSave(reg: ServiceWorkerRegistration): Promise<void> {
+  const key = urlBase64ToUint8Array(vapidPublicKey);
+  let sub = await reg.pushManager.getSubscription();
+  if (sub && !sameKey(sub.options.applicationServerKey, key)) { await sub.unsubscribe(); sub = null; }   // kunci VAPID berganti
+  if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key as BufferSource });
+  const j = sub.toJSON();
+  if (!j.endpoint || !j.keys?.p256dh || !j.keys?.auth) throw new Error('Langganan push tidak lengkap dari browser.');
+  await registerPushSubscription({ endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth, userAgent: navigator.userAgent.slice(0, 200), label: deviceLabel(navigator.userAgent) });
+}
+
+/** Dipanggil HANYA dari klik tombol. Meminta izin, membuat langganan, menyimpannya lewat RPC. */
+export async function enablePush(): Promise<void> {
+  if (pushSupport() !== 'ok') throw new Error('Perangkat/browser ini belum dapat menerima notifikasi push.');
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') throw new Error(perm === 'denied' ? 'Izin notifikasi ditolak. Ubah di pengaturan situs browser.' : 'Izin notifikasi belum diberikan.');
+  await subscribeAndSave(await getRegistration());
+}
+
+/** Sinkronisasi senyap (tanpa dialog izin): memperbarui langganan di database bila izin SUDAH diberikan sebelumnya. */
+export async function syncPushSubscription(): Promise<void> {
+  if (pushSupport() !== 'ok' || Notification.permission !== 'granted') return;
+  const reg = await navigator.serviceWorker.getRegistration('/');
+  if (!reg) return;
+  await subscribeAndSave(reg);
 }
 
 export async function disablePush(): Promise<void> {
   if (!('serviceWorker' in navigator)) return;
-  const reg = await navigator.serviceWorker.ready;
-  const sub = await reg.pushManager.getSubscription();
-  if (sub) { await deletePushSubscription(sub.endpoint).catch(() => undefined); await sub.unsubscribe(); }
+  const reg = await navigator.serviceWorker.getRegistration('/');
+  const sub = await reg?.pushManager.getSubscription();
+  if (sub) { await removePushSubscriptionByEndpoint(sub.endpoint).catch(() => undefined); await sub.unsubscribe(); }
 }
 
-export async function hasPushSubscription(): Promise<boolean> {
-  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return false;
-  try { const reg = await navigator.serviceWorker.ready; return !!(await reg.pushManager.getSubscription()); } catch { return false; }
+export async function currentEndpoint(): Promise<string | null> {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return null;
+  try { const reg = await navigator.serviceWorker.getRegistration('/'); return (await reg?.pushManager.getSubscription())?.endpoint ?? null; } catch { return null; }
 }
+
+export async function hasPushSubscription(): Promise<boolean> { return (await currentEndpoint()) !== null; }

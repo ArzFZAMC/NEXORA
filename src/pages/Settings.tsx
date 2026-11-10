@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { useApp, useData } from '../app/AppContext';
 import { useI18n } from '../i18n';
 import { PageHeader, Segmented, useConfirm, useToast } from '../components/ui/ui';
 import { Icon } from '../components/ui/Icon';
 import * as api from '../lib/api';
 import { parseBackup, backupFilename, type BackupSummary } from '../lib/backup';
-import { disablePush, enablePush, hasPushSubscription, pushSupport } from '../lib/push';
+import PushSettings from '../features/notifications/PushSettings';
 import { playTestTone } from '../lib/sound';
 import type { AccentName, Preset, ThemeName } from '../lib/types';
 
@@ -27,14 +27,10 @@ export default function Settings() {
   const [name, setName] = useState(d.profile.display_name);
   const [tz, setTz] = useState(d.profile.timezone);
   const [pw, setPw] = useState(''); const [pw2, setPw2] = useState('');
-  const [pushOn, setPushOn] = useState(false);
   const [restore, setRestore] = useState<{ data: Record<string, unknown>; summary: BackupSummary } | null>(null);
   const [restoreErr, setRestoreErr] = useState<string[] | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
-  const support = pushSupport();
   const zones = useMemo(() => { try { return (Intl as unknown as { supportedValuesOf: (k: string) => string[] }).supportedValuesOf('timeZone'); } catch { return ['Asia/Jakarta', 'Asia/Makassar', 'Asia/Jayapura', 'UTC']; } }, []);
-
-  useEffect(() => { void hasPushSubscription().then(setPushOn); }, []);
 
   const save = async (fn: () => Promise<void>) => { await attempt(fn, t('settings.saved')); await refresh(); };
 
@@ -72,14 +68,7 @@ export default function Settings() {
             onChange={(e) => void save(() => api.updateSettings(uid, { notify_sound: e.target.checked }))} /><span className="text-sm">{t('settings.soundOn')}</span></label>
           <div className="flex gap-2 flex-wrap items-center"><button className="btn-ghost btn-sm" onClick={() => { if (!playTestTone()) toast(t('settings.soundBlocked'), 'error'); }}><Icon name="play" size={14} />{t('settings.testSound')}</button>
             <span className="text-xs text-muted">{t('settings.testSoundHint')}</span></div>
-          <div className="border-t border-line pt-4">
-            <p className="font-medium text-sm">{t('settings.push')}</p>
-            <p className="text-xs text-muted mt-1">{t(`push.${support}`)}</p>
-            {support === 'ok' && (pushOn
-              ? <button className="btn-ghost mt-3" onClick={async () => { await attempt(async () => { await disablePush(); await api.updateSettings(uid, { notify_push: false }); setPushOn(false); }, t('settings.pushOff')); await refresh(); }}>{t('settings.pushDisable')}</button>
-              : <button className="btn-primary mt-3" onClick={async () => { await attempt(async () => { await enablePush(uid); await api.updateSettings(uid, { notify_push: true }); setPushOn(true); }, t('settings.pushOk')); await refresh(); }}><Icon name="bell" size={16} />{t('settings.pushEnable')}</button>)}
-            <p className="text-xs text-muted mt-3">{t('settings.pushLimit')}</p>
-          </div>
+          <PushSettings />
         </Section>
 
         <Section title={t('settings.backup')} hint={t('settings.backupHint')}>

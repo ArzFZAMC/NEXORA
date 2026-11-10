@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useApp, useData } from '../app/AppContext';
 import { useI18n } from '../i18n';
 import { PageHeader, Segmented, Spinner } from '../components/ui/ui';
@@ -8,6 +9,7 @@ import { useActivityForm } from '../features/activities/FormHost';
 import { addRestDay, fetchInstances, removeRestDay, toApiError } from '../lib/api';
 import { addDays, addMonths, eachDay, endOfMonth, formatDate, startOfMonth, startOfWeek, shortTime, dayOfWeek, type ISODate } from '../lib/date';
 import { projectMissing } from '../lib/recurrence';
+import { parseDateParam } from '../lib/pushUtil';
 import type { Instance } from '../lib/types';
 
 type View = 'day' | 'week' | 'month';
@@ -22,6 +24,10 @@ export default function Calendar() {
   const [selected, setSelected] = useState<ISODate>(today);
   const [items, setItems] = useState<Instance[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // Deep link dari notifikasi push: /calendar?date=YYYY-MM-DD membuka tanggal tersebut
+  const [params] = useSearchParams();
+  const linkedDate = parseDateParam(params.get('date'));
+  useEffect(() => { if (linkedDate) { setCursor(linkedDate as ISODate); setSelected(linkedDate as ISODate); } }, [linkedDate]);
 
   const range = useMemo(() => {
     if (view === 'day') return { from: cursor, to: cursor };
